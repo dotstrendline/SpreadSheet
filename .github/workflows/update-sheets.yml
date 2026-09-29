@@ -1,0 +1,52 @@
+name: Update NIFTY Google Sheet
+
+on:
+  schedule:
+    # 09:20-15:30 IST = 03:50-10:00 UTC, Mon-Fri, every 5 min
+    - cron: "50,55 3 * * 1-5"
+    - cron: "*/5 4-9 * * 1-5"
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch: {}   # manual test run from the Actions tab
+
+permissions:
+  contents: write   # commits the CSV logs (H1 average + option-score grid) back to the repo
+
+concurrency:
+  group: nifty-sheets-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Kolkata   # so datetime.now() is IST
+      SHEET_WEBHOOK_URL: ${{ secrets.SHEET_WEBHOOK_URL }}
+      SHEET_TOKEN: ${{ secrets.SHEET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Fetch NSE data, update CSVs, write Google Sheet
+        run: python nifty_to_sheets.py --once
+
+      # The CSVs are the memory between runs (AVG_H1 and the Strike x Time grid
+      # build on them), so commit them even if the Sheet write failed this cycle.
+      - name: Commit CSV logs
+        if: always()
+        run: |
+          git config user.name "nifty-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data
+          if ! git diff --cached --quiet; then
+            git commit -m "Update NIFTY logs $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git pull --rebase origin main
+            git push
+          else
+            echo "No changes this cycle."
+          fi
