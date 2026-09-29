@@ -4,9 +4,10 @@
 computes H1 breadth + option score, logs both to CSV in `data/`, and writes today's data
 into your Google Sheet through a tiny Apps Script web app. No HTML is generated.
 
-Tabs (created automatically, one pair per trading day):
-- `H1_<date>`           : time | H1 | AVG_H1
-- `OptionScore_<date>`  : Strike price x HH:MM grid (green positive / red negative)
+Only two tabs are used (created automatically the first time):
+- `H1`           : time | H1 | AVG_H1
+- `OptionScore`  : Strike price x HH:MM grid (green positive / red negative)
+Each new trading day replaces the previous day's view. Full history stays in the CSVs in `data/`.
 
 ## One-time setup (about 5 minutes)
 1. Open your Google Sheet -> Extensions -> Apps Script.
