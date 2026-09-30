@@ -563,10 +563,10 @@ NIFTY50_HEADER = ["Symbol", "Open", "High", "Low", "LTP", "% Change", "Time"]
 def nifty50_sheet_values(rows: list, fetched_at: str) -> list:
     """NIFTY 50 data from this run's NSE call: the NIFTY 50 index itself on the
     first row, then the 50 constituents A-Z. Columns: Symbol, Open, High, Low,
-    LTP, % Change, Time (time of the run that fetched it). % Change is NSE's
+    LTP, % Change, Time (date + time of the run that fetched it). % Change is NSE's
     own pChange; if NSE didn't send it, it is worked out from the previous
     close when available."""
-    run_time = fetched_at.split(" ")[-1]  # HH:MM:SS
+    run_time = fetched_at  # full "YYYY-MM-DD HH:MM:SS"
 
     def make_row(row, symbol):
         open_ = _safe_float(_ci_get(row, "OPEN"))
