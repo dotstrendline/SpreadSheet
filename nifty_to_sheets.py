@@ -15,8 +15,9 @@ One script, no HTML. Every cycle (5 min) it:
   3. GOOGLE SHEET - pushes both of today's CSVs into your Google Spreadsheet:
                        tab  H1            (time | H1 | AVG_H1)
                        tab  OptionScore   (Strike price x HH:MM grid)
-                       tab  Nifty50_Data  (latest snapshot of all 50 stocks)
-                   Only these three tabs are used. They are rewritten in full
+                       tab  OptionLTP     (Strike x HH:MM CE / PE option prices)
+                       tab  Nifty50_Data  (latest snapshot of index + 50 stocks)
+                   Only these four tabs are used. They are rewritten in full
                    from today's CSVs each cycle, so a new trading day replaces
                    yesterday's view (history stays in the CSVs), and a failed
                    write is repaired automatically by the next run.
@@ -60,6 +61,7 @@ import requests
 ROOT = os.path.dirname(os.path.abspath(__file__))
 H1_AVG_DIR = os.path.join(ROOT, "data", "H1_avg")
 OPTION_DIR = os.path.join(ROOT, "data", "option_score")
+OPTION_LTP_DIR = os.path.join(ROOT, "data", "option_ltp")
 
 REFRESH_SECONDS = 300  # 5 minutes
 FETCH_RETRIES = 3
@@ -314,8 +316,8 @@ def _get_nearest_expiry(session, symbol):
 
 
 def fetch_option_chain_raw(symbol: str = OPTION_SYMBOL, retries: int = FETCH_RETRIES):
-    """List of (strike, call_oi, call_chng_oi, put_oi, put_chng_oi) for the
-    nearest expiry."""
+    """List of (strike, call_oi, call_chng_oi, put_oi, put_chng_oi, call_ltp,
+    put_ltp) for the nearest expiry."""
     last_err = None
 
     for attempt in range(1, retries + 1):
@@ -357,6 +359,8 @@ def fetch_option_chain_raw(symbol: str = OPTION_SYMBOL, retries: int = FETCH_RET
                     float(ce.get("changeinOpenInterest", 0) or 0),
                     float(pe.get("openInterest", 0) or 0),
                     float(pe.get("changeinOpenInterest", 0) or 0),
+                    float(ce.get("lastPrice", 0) or 0),   # call LTP
+                    float(pe.get("lastPrice", 0) or 0),   # put LTP
                 ))
 
             if rows:
@@ -374,7 +378,7 @@ def compute_rows(raw_rows, open_price, band):
     """Strike -> Option Score for strikes within open +/- band."""
     low, high = open_price - band, open_price + band
     rows = []
-    for strike, call_oi, call_chng, put_oi, put_chng in raw_rows:
+    for strike, call_oi, call_chng, put_oi, put_chng, *_ in raw_rows:
         if not (low <= strike <= high):
             continue
 
@@ -387,6 +391,34 @@ def compute_rows(raw_rows, open_price, band):
         rows.append({"strike": strike, "option_score": round_half_up((put_pct - call_pct) / 10)})
     rows.sort(key=lambda r: r["strike"])
     return rows
+
+
+def compute_ltp_rows(raw_rows, open_price, band):
+    """(strike, call_ltp, put_ltp) for strikes within open +/- band."""
+    low, high = open_price - band, open_price + band
+    rows = [(t[0], t[5], t[6]) for t in raw_rows if len(t) >= 7 and low <= t[0] <= high]
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def option_ltp_csv_path(date_str: str) -> str:
+    os.makedirs(OPTION_LTP_DIR, exist_ok=True)
+    return os.path.join(OPTION_LTP_DIR, f"option_ltp_{date_str}.csv")
+
+
+def update_ltp_grid(ltp_rows, now: datetime) -> str:
+    """Merge this cycle's LTPs into today's Strike x Time CSV. Each time slot
+    gets two columns, 'HH:MM CE' and 'HH:MM PE' (a re-run of the same slot
+    overwrites it). Returns the CSV path."""
+    path = option_ltp_csv_path(now.strftime("%Y-%m-%d"))
+    t = now.strftime("%H:%M")
+
+    grid = load_score_grid(path)
+    for strike, call_ltp, put_ltp in ltp_rows:
+        grid.setdefault(strike, {})[f"{t} CE"] = call_ltp
+        grid.setdefault(strike, {})[f"{t} PE"] = put_ltp
+    save_score_grid(path, grid, decimals=2)
+    return path
 
 
 def option_csv_path(date_str: str) -> str:
@@ -424,8 +456,9 @@ def load_score_grid(path):
     return grid
 
 
-def save_score_grid(path, grid):
-    """Strike price in column 1, times across the header, rounded scores."""
+def save_score_grid(path, grid, decimals=None):
+    """Strike price in column 1, times across the header. Scores are rounded to
+    whole numbers (decimals=None); pass decimals=2 for prices (option LTP)."""
     strikes = sorted(grid.keys())
     times = sorted({t for scores in grid.values() for t in scores})
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -435,7 +468,8 @@ def save_score_grid(path, grid):
             row = [f"{strike:g}"]
             for t in times:
                 v = grid[strike].get(t)
-                row.append("" if v is None else round_half_up(v))
+                row.append("" if v is None else
+                           (round_half_up(v) if decimals is None else round(v, decimals)))
             writer.writerow(row)
 
 
@@ -467,7 +501,9 @@ def run_option_cycle() -> bool:
         print(f"[{log_time}] [OPTION ERROR] No strikes inside open +/- {BAND:g} - nothing logged.")
         return False
 
-    path = update_score_grid(rows, datetime.now())
+    now = datetime.now()
+    path = update_score_grid(rows, now)
+    update_ltp_grid(compute_ltp_rows(raw_rows, open_price, BAND), now)
     print(f"[{log_time}] OPTION OK - open={open_price:.2f} strikes={len(rows)} -> {path}")
     return True
 
@@ -489,7 +525,7 @@ def h1_sheet_values(path: str) -> list:
     return values if len(values) > 1 else []
 
 
-def option_sheet_values(path: str) -> list:
+def option_sheet_values(path: str, decimals=None) -> list:
     """Today's option-score pivot CSV as a table: header + one row per strike."""
     grid = load_score_grid(path)
     if not grid:
@@ -501,7 +537,8 @@ def option_sheet_values(path: str) -> list:
         row = [int(strike) if strike == int(strike) else strike]
         for t in times:
             v = grid[strike].get(t)
-            row.append("" if v is None else round_half_up(v))
+            row.append("" if v is None else
+                       (round_half_up(v) if decimals is None else round(v, decimals)))
         values.append(row)
     return values
 
@@ -555,6 +592,7 @@ class SheetsWriter:
 
 H1_TAB = "H1"
 OPTION_TAB = "OptionScore"
+OPTION_LTP_TAB = "OptionLTP"
 NIFTY50_TAB = "Nifty50_Data"
 
 NIFTY50_HEADER = ["Symbol", "Open", "High", "Low", "LTP", "% Change", "Time"]
@@ -615,6 +653,10 @@ def push_to_sheets(writer) -> bool:
     if opt_values:
         opt_values[0][0] = f"Strike price ({today})"  # shows which day the grid is for
 
+    ltp_values = option_sheet_values(option_ltp_csv_path(today), decimals=2)
+    if ltp_values:
+        ltp_values[0][0] = f"Strike price ({today})"
+
     # Nifty50_Data is only refreshed when THIS run fetched fresh constituents;
     # if the NSE fetch failed, the last good snapshot in the sheet stays put.
     n50_values = []
@@ -624,6 +666,7 @@ def push_to_sheets(writer) -> bool:
     for title, values, kwargs in (
         (H1_TAB, h1_values, {"text_first_col": True}),
         (OPTION_TAB, opt_values, {"freeze_col": True, "color_scores": True}),
+        (OPTION_LTP_TAB, ltp_values, {"freeze_col": True}),
         (NIFTY50_TAB, n50_values, {"freeze_col": True}),
     ):
         if not values:
