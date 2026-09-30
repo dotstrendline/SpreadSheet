@@ -15,9 +15,10 @@ One script, no HTML. Every cycle (5 min) it:
   3. GOOGLE SHEET - pushes both of today's CSVs into your Google Spreadsheet:
                        tab  H1            (time | H1 | AVG_H1)
                        tab  OptionScore   (Strike price x HH:MM grid)
-                       tab  OptionLTP     (Strike x HH:MM CE / PE option prices)
+                       tab  OptionLTP_CE  (Strike x HH:MM call option prices)
+                       tab  OptionLTP_PE  (Strike x HH:MM put option prices)
                        tab  Nifty50_Data  (latest snapshot of index + 50 stocks)
-                   Only these four tabs are used. They are rewritten in full
+                   Only these five tabs are used. They are rewritten in full
                    from today's CSVs each cycle, so a new trading day replaces
                    yesterday's view (history stays in the CSVs), and a failed
                    write is repaired automatically by the next run.
@@ -543,6 +544,24 @@ def option_sheet_values(path: str, decimals=None) -> list:
     return values
 
 
+def option_ltp_side_values(path: str, side: str) -> list:
+    """One side ('CE' or 'PE') of today's option-LTP CSV as a Strike x HH:MM
+    table (header = plain HH:MM times)."""
+    grid = load_score_grid(path)
+    suffix = f" {side}"
+    labels = sorted({t for prices in grid.values() for t in prices if t.endswith(suffix)})
+    if not labels:
+        return []
+    values = [["Strike price"] + [t[:-len(suffix)] for t in labels]]
+    for strike in sorted(grid):
+        row = [int(strike) if strike == int(strike) else strike]
+        for t in labels:
+            v = grid[strike].get(t)
+            row.append("" if v is None else round(v, 2))
+        values.append(row)
+    return values
+
+
 class SheetsWriter:
     """Sends each table to a small Google Apps Script web app (see
     apps_script.gs) that lives inside your Google Sheet and writes the tab.
@@ -592,7 +611,8 @@ class SheetsWriter:
 
 H1_TAB = "H1"
 OPTION_TAB = "OptionScore"
-OPTION_LTP_TAB = "OptionLTP"
+OPTION_LTP_CE_TAB = "OptionLTP_CE"
+OPTION_LTP_PE_TAB = "OptionLTP_PE"
 NIFTY50_TAB = "Nifty50_Data"
 
 NIFTY50_HEADER = ["Symbol", "Open", "High", "Low", "LTP", "% Change", "Time"]
@@ -653,9 +673,12 @@ def push_to_sheets(writer) -> bool:
     if opt_values:
         opt_values[0][0] = f"Strike price ({today})"  # shows which day the grid is for
 
-    ltp_values = option_sheet_values(option_ltp_csv_path(today), decimals=2)
-    if ltp_values:
-        ltp_values[0][0] = f"Strike price ({today})"
+    ltp_path = option_ltp_csv_path(today)
+    ce_values = option_ltp_side_values(ltp_path, "CE")
+    pe_values = option_ltp_side_values(ltp_path, "PE")
+    for v in (ce_values, pe_values):
+        if v:
+            v[0][0] = f"Strike price ({today})"
 
     # Nifty50_Data is only refreshed when THIS run fetched fresh constituents;
     # if the NSE fetch failed, the last good snapshot in the sheet stays put.
@@ -666,7 +689,8 @@ def push_to_sheets(writer) -> bool:
     for title, values, kwargs in (
         (H1_TAB, h1_values, {"text_first_col": True}),
         (OPTION_TAB, opt_values, {"freeze_col": True, "color_scores": True}),
-        (OPTION_LTP_TAB, ltp_values, {"freeze_col": True}),
+        (OPTION_LTP_CE_TAB, ce_values, {"freeze_col": True}),
+        (OPTION_LTP_PE_TAB, pe_values, {"freeze_col": True}),
         (NIFTY50_TAB, n50_values, {"freeze_col": True}),
     ):
         if not values:
